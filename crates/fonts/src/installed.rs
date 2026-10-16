@@ -205,13 +205,22 @@ const COMMON: [&str; 16] = [
     "DejaVu Sans Mono",
 ];
 
-/// The best of `faces` for `text`: one that covers all of it, the paragraph's class and weight
-/// first, then common document families, then the rest by name. `None` when no face covers it.
-pub fn best<'a>(faces: &'a [InstalledFace], text: &str, class: Class, bold: bool, italic: bool) -> Option<&'a InstalledFace> {
+/// The best of `faces` for `text`: one that covers all of it; the full face of `family` (the
+/// paragraph's own font, often embedded as a subset) first, then the paragraph's class and
+/// weight, then common document families, then the rest by name. `None` when no face covers it.
+pub fn best<'a>(faces: &'a [InstalledFace], text: &str, family: &str, class: Class, bold: bool, italic: bool) -> Option<&'a InstalledFace> {
+    let key = crate::embedding::face_key(family);
+    let same_family = |f: &InstalledFace| {
+        let family_key = crate::embedding::face_key(&f.family);
+        !key.is_empty() && (crate::embedding::face_key(&f.postscript) == key || (!family_key.is_empty() && key.starts_with(&family_key)))
+    };
     let common = |f: &InstalledFace| {
         COMMON.iter().position(|c| f.family.eq_ignore_ascii_case(c) || f.family.starts_with(&format!("{c} "))).unwrap_or(COMMON.len())
     };
-    faces.iter().filter(|f| f.covers(text)).min_by_key(|f| (f.class != class, f.bold != bold, f.italic != italic, common(f), f.family.len()))
+    faces
+        .iter()
+        .filter(|f| f.covers(text))
+        .min_by_key(|f| (!same_family(f), f.class != class, f.bold != bold, f.italic != italic, common(f), f.family.len()))
 }
 
 /// The program of `face`, re-read and validated (the file may have changed since the scan).
@@ -235,10 +244,10 @@ pub fn load(face: &InstalledFace) -> Option<Arc<Vec<u8>>> {
     Some(bytes)
 }
 
-/// An installed font program that can show all of `text` in the paragraph's look, with its
-/// PostScript name. `None` when turned off or nothing installed covers it.
-pub fn font_for(text: &str, class: Class, bold: bool, italic: bool) -> Option<(Arc<Vec<u8>>, String)> {
-    let face = best(faces(), text, class, bold, italic)?;
+/// An installed font program that can show all of `text` in the look of the paragraph's font
+/// `family`, with its PostScript name. `None` when turned off or nothing installed covers it.
+pub fn font_for(text: &str, family: &str, class: Class, bold: bool, italic: bool) -> Option<(Arc<Vec<u8>>, String)> {
+    let face = best(faces(), text, family, class, bold, italic)?;
     Some((load(face)?, face.postscript.clone()))
 }
 
@@ -290,13 +299,22 @@ mod tests {
             face("Times New Roman", Class::Serif, false, vec![latin, arabic]),
             face("Inter", Class::Sans, false, vec![latin]),
         ];
-        let pick = |text, class, bold| best(&faces, text, class, bold, false).map(|f| f.family.as_str());
+        let pick = |text, class, bold| best(&faces, text, "", class, bold, false).map(|f| f.family.as_str());
         assert_eq!(pick("مرحبا world", Class::Sans, false), Some("Arial"), "a common family over a decorative one");
         assert_eq!(pick("مرحبا", Class::Sans, true), Some("Arial Bold"));
         assert_eq!(pick("مرحبا", Class::Serif, false), Some("Times New Roman"));
         assert_eq!(pick("hello", Class::Sans, false), Some("Arial"));
         assert_eq!(pick("日本", Class::Sans, false), None, "nothing covers it");
-        assert_eq!(best(&[], "a", Class::Sans, false, false).map(|f| f.family.as_str()), None);
+        assert_eq!(best(&[], "a", "", Class::Sans, false, false).map(|f| f.family.as_str()), None);
+        // The paragraph's own family, installed in full, wins over every other face, the subset
+        // prefix and style suffix of its PDF name notwithstanding.
+        let mut din = face("DIN Next LT Arabic", Class::Sans, false, vec![latin, arabic]);
+        din.postscript = "DINNextLTArabic-Regular".into();
+        let with_din = [faces[1].clone(), din];
+        let own = |name| best(&with_din, "مرحبا", name, Class::Sans, false, false).map(|f| f.family.as_str());
+        assert_eq!(own("AAAAAA+DINNextLTArabic-Regular"), Some("DIN Next LT Arabic"));
+        assert_eq!(own("DINNextLTArabic-Bold"), Some("DIN Next LT Arabic"));
+        assert_eq!(own("Helvetica"), Some("Arial"));
     }
 
     #[test]

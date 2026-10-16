@@ -344,6 +344,31 @@ pub(super) fn rewrite_styled_block(
             styled_spans.push((start..end, index));
         }
     }
+    // One font chosen for the whole paragraph, whose source runs differ only in which run they
+    // were: draw it as one run, so a row of contextual text (Arabic) is shaped in one piece rather
+    // than refused at the old run boundaries.
+    if style.resource.is_some()
+        && ranges.is_empty()
+        && style.family.is_none()
+        && style.bold.is_none()
+        && let Some(&(_, lead)) = styled_spans.first()
+        && let Some(lead_line) = styled_lines.get(lead)
+    {
+        let alike = |line: &TextLine| {
+            let (a, b) = (&line.origin.state, &lead_line.origin.state);
+            (line.size - lead_line.size).abs() <= lead_line.size.abs() * 0.01
+                && line.color == lead_line.color
+                && (line.origin.k - lead_line.origin.k).abs() <= lead_line.origin.k.abs() * 0.01
+                && (a.char_spacing - b.char_spacing).abs() < 1e-6
+                && (a.word_spacing - b.word_spacing).abs() < 1e-6
+                && (a.scale - b.scale).abs() < 1e-6
+        };
+        if styled_spans.iter().all(|(_, index)| styled_lines.get(*index).is_some_and(alike)) {
+            for span in &mut styled_spans {
+                span.1 = lead;
+            }
+        }
+    }
     let lines = styled_lines.as_slice();
     let p = page_dict(doc, page)?;
     let mut res = p.dict.get(b"Resources").and_then(|r| doc.resolve(r).as_dict().cloned()).unwrap_or_default();

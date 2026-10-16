@@ -4286,3 +4286,28 @@ fn text_the_page_font_has_keeps_it() {
     let lines = text::text_lines(&reopen(&doc), 0).unwrap();
     assert!(lines.iter().all(|l| !l.font.starts_with("PCFull")), "{:?}", lines.iter().map(|l| &l.font).collect::<Vec<_>>());
 }
+
+/// Choosing a font from the page that can't show the draft (a subset of the paragraph's own font)
+/// still finds an installed one, and a paragraph drawn in several runs is written as one.
+#[test]
+fn a_chosen_font_without_the_characters_falls_back_to_an_installed_one() {
+    let replacement = "Привет, world";
+    // Two runs in the same subset font, the paragraph's one line drawn in two pieces.
+    let mut doc = text_page("BT /F1 12 Tf 72 700 Td (Orig) Tj ET BT /F1 12 Tf 96.012 700 Td (inal) Tj ET");
+    crate::text::TEST_INSTALLED.with_borrow_mut(|faces| *faces = installed_assets());
+    let style = text::BlockStyle { resource: Some("F1".into()), ..text::BlockStyle::default() };
+    let applied = text::rewrite_block(&mut doc, 0, 0, Some(replacement), &style);
+    crate::text::TEST_INSTALLED.with_borrow_mut(|faces| faces.clear());
+    applied.unwrap();
+    let lines = text::text_lines(&reopen(&doc), 0).unwrap();
+    assert_eq!(lines.iter().map(|l| l.text.as_str()).collect::<String>(), replacement);
+    assert!(lines.iter().all(|l| l.base_font.contains("Inter")), "{:?}", lines.iter().map(|l| &l.base_font).collect::<Vec<_>>());
+    // A chosen font that shows the text is kept.
+    let mut doc = styled_text_page("Helvetica");
+    crate::text::TEST_INSTALLED.with_borrow_mut(|faces| *faces = installed_assets());
+    let style = text::BlockStyle { resource: Some("F1".into()), ..text::BlockStyle::default() };
+    let applied = text::rewrite_block(&mut doc, 0, 0, Some("Plain"), &style);
+    crate::text::TEST_INSTALLED.with_borrow_mut(|faces| faces.clear());
+    applied.unwrap();
+    assert!(text::text_lines(&reopen(&doc), 0).unwrap().iter().all(|l| !l.font.starts_with("PCFull")));
+}

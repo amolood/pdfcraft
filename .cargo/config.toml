@@ -1,2 +1,8 @@
 [alias]
 xtask = "run -p xtask --"
+
+# Fork: embed the craft-fonts fallback faces whenever a checkout sits next to this one
+# (`git clone https://github.com/storytold/craft-fonts ../craft-fonts`). Without it the build
+# only warns and goes on without them; an exported CRAFT_FONTS_DIR still wins.
+[env]
+CRAFT_FONTS_DIR = { value = "../craft-fonts", relative = true }

@@ -135,10 +135,10 @@ pub fn register_text_font(doc: &mut Document, page: usize, bytes: &[u8]) -> Resu
     Ok(name)
 }
 
-/// When `draft` has a character none of the paragraph's fonts can show (and no standard font
-/// can stand in for), embed the installed font that best shows all of it in this page's
-/// resources and return `style` with that font chosen. `None` when the style already picks a
-/// font, the text needs a path this can't take (Hebrew, turned text), or nothing installed fits.
+/// When `draft` has a character none of the paragraph's fonts (or the chosen font) can show, and
+/// no standard font can stand in for, embed the installed font that best shows all of it in this
+/// page's resources and return `style` with that font chosen. `None` when a chosen font shows it,
+/// the text needs a path this can't take (Hebrew, turned text), or nothing installed fits.
 fn installed_font_style(
     doc: &mut Document,
     page: usize,
@@ -146,7 +146,7 @@ fn installed_font_style(
     draft: &str,
     style: &BlockStyle,
 ) -> Result<Option<BlockStyle>, EditError> {
-    if style.resource.is_some() || style.family.is_some() || style.bold.is_some() || !style.ranges.is_empty() {
+    if style.family.is_some() || style.bold.is_some() || !style.ranges.is_empty() {
         return Ok(None);
     }
     let Some(first) = members.first() else { return Ok(None) };
@@ -155,8 +155,17 @@ fn installed_font_style(
     }
     let p = page_dict(doc, page)?;
     let fonts = p.dict.get(b"Resources").and_then(|r| doc.dict(r)).and_then(|r| r.get(b"Font").and_then(|f| doc.dict(f))).unwrap_or_default();
+    // A chosen font stands unless it can't show the draft (a subset of the paragraph's own font
+    // picked from the document's fonts, say); then the installed fonts are searched as if none were.
+    let chosen: Vec<&str> = match &style.resource {
+        Some(resource) => vec![resource.as_str()],
+        None => members.iter().map(|line| line.font.as_str()).collect(),
+    };
     let metrics: Vec<Metrics> =
-        members.iter().filter_map(|line| fonts.get(line.font.as_bytes()).and_then(|f| doc.dict(f))).map(|d| Metrics::from_dict(doc, &d)).collect();
+        chosen.iter().filter_map(|name| fonts.get(name.as_bytes()).and_then(|f| doc.dict(f))).map(|d| Metrics::from_dict(doc, &d)).collect();
+    if style.resource.is_some() && metrics.iter().any(|m| source_encodes(m, &draft.replace(['\n', '\r'], " "))) {
+        return Ok(None);
+    }
     let missing =
         draft.chars().any(|c| !c.is_whitespace() && !is_win_ansi_char(c) && !metrics.iter().any(|m| source_encodes(m, c.encode_utf8(&mut [0; 4]))));
     if !missing {
@@ -168,7 +177,7 @@ fn installed_font_style(
         crate::added::Family::Helvetica => pdfcraft_fonts::installed::Class::Sans,
     };
     let flat: String = draft.chars().filter(|c| !matches!(c, '\n' | '\r')).collect();
-    let Some((bytes, postscript)) = installed_font(&flat, class, first.bold, first.italic) else { return Ok(None) };
+    let Some((bytes, postscript)) = installed_font(&flat, &first.base_font, class, first.bold, first.italic) else { return Ok(None) };
     let mut resources = p.dict.get(b"Resources").and_then(|o| doc.dict(o)).unwrap_or_default();
     let mut fonts = resources.get(b"Font").and_then(|o| doc.dict(o)).unwrap_or_default();
     let name = pdfcraft_fonts::embedding::embed(doc, &mut fonts, &bytes, &postscript).map_err(EditError::Invalid)?;
@@ -179,15 +188,27 @@ fn installed_font_style(
 
 /// The installed font program for `text`, and its PostScript name.
 #[cfg(not(test))]
-fn installed_font(text: &str, class: pdfcraft_fonts::installed::Class, bold: bool, italic: bool) -> Option<(std::sync::Arc<Vec<u8>>, String)> {
-    pdfcraft_fonts::installed::font_for(text, class, bold, italic)
+fn installed_font(
+    text: &str,
+    family: &str,
+    class: pdfcraft_fonts::installed::Class,
+    bold: bool,
+    italic: bool,
+) -> Option<(std::sync::Arc<Vec<u8>>, String)> {
+    pdfcraft_fonts::installed::font_for(text, family, class, bold, italic)
 }
 
 /// Tests choose from the faces they set, never from the fonts of the machine running them.
 #[cfg(test)]
-fn installed_font(text: &str, class: pdfcraft_fonts::installed::Class, bold: bool, italic: bool) -> Option<(std::sync::Arc<Vec<u8>>, String)> {
+fn installed_font(
+    text: &str,
+    family: &str,
+    class: pdfcraft_fonts::installed::Class,
+    bold: bool,
+    italic: bool,
+) -> Option<(std::sync::Arc<Vec<u8>>, String)> {
     TEST_INSTALLED.with_borrow(|faces| {
-        let face = pdfcraft_fonts::installed::best(faces, text, class, bold, italic)?;
+        let face = pdfcraft_fonts::installed::best(faces, text, family, class, bold, italic)?;
         Some((pdfcraft_fonts::installed::load(face)?, face.postscript.clone()))
     })
 }
