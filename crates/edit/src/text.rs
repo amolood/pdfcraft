@@ -122,9 +122,9 @@ pub fn text_editor_fonts(doc: &Document, page: usize) -> Result<Vec<TextEditorFo
 }
 
 /// Load an explicit full face into this page's resources. Nothing on the page is replaced;
-/// the new resource can complete matching source subsets or be chosen in a text style.
+/// the new resource can complete matching source subsets or be chosen in a text style. The face
+/// must allow editable embedding (`fsType`); its licence is the user's to check (fork policy).
 pub fn register_text_font(doc: &mut Document, page: usize, bytes: &[u8]) -> Result<String, EditError> {
-    pdfcraft_fonts::embedding::validate_document_input(bytes).map_err(EditError::Invalid)?;
     let (_, postscript) = pdfcraft_fonts::embedding::names(bytes).map_err(EditError::Invalid)?;
     let p = page_dict(doc, page)?;
     let mut resources = p.dict.get(b"Resources").and_then(|o| doc.dict(o)).unwrap_or_default();
