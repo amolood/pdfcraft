@@ -4249,3 +4249,40 @@ fn japanese_paragraphs_wrap_between_characters_without_closing_marks_at_a_row_st
         }
     }
 }
+
+/// The faces of the repository's own `assets/fonts`, standing in for the fonts installed on a machine.
+fn installed_assets() -> Vec<pdfcraft_fonts::installed::InstalledFace> {
+    pdfcraft_fonts::installed::scan(&[std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/fonts"))])
+}
+
+/// Text no font on the page has is written in an installed font that shows all of it, embedded so
+/// that reopening needs nothing installed; without one, editing behaves as before.
+#[test]
+fn a_character_no_page_font_has_is_drawn_with_an_installed_font() {
+    let replacement = "Привет, world";
+    let mut doc = styled_text_page("Helvetica");
+    crate::text::TEST_INSTALLED.with_borrow_mut(|faces| faces.clear());
+    let without = text::replace_block(&mut doc.clone(), 0, 0, replacement);
+    assert_eq!(without.is_ok(), pdfcraft_fonts::document_japanese_font().is_some(), "{without:?}");
+
+    crate::text::TEST_INSTALLED.with_borrow_mut(|faces| *faces = installed_assets());
+    text::replace_block(&mut doc, 0, 0, replacement).unwrap();
+    crate::text::TEST_INSTALLED.with_borrow_mut(|faces| faces.clear());
+    let reopened = reopen(&doc);
+    let lines = text::text_lines(&reopened, 0).unwrap();
+    assert_eq!(lines.iter().map(|l| l.text.as_str()).collect::<String>(), replacement);
+    // One face for the whole paragraph (Inter, the sans face that has Cyrillic), embedded in full.
+    assert!(lines.iter().all(|l| l.base_font.contains("Inter")), "{:?}", lines.iter().map(|l| &l.base_font).collect::<Vec<_>>());
+    assert!(lines.iter().all(|l| l.font.starts_with("PCFull")));
+}
+
+/// Text the page's own font can show never pulls in an installed font.
+#[test]
+fn text_the_page_font_has_keeps_it() {
+    let mut doc = styled_text_page("Helvetica");
+    crate::text::TEST_INSTALLED.with_borrow_mut(|faces| *faces = installed_assets());
+    text::replace_block(&mut doc, 0, 0, "Café 5€").unwrap();
+    crate::text::TEST_INSTALLED.with_borrow_mut(|faces| faces.clear());
+    let lines = text::text_lines(&reopen(&doc), 0).unwrap();
+    assert!(lines.iter().all(|l| !l.font.starts_with("PCFull")), "{:?}", lines.iter().map(|l| &l.font).collect::<Vec<_>>());
+}

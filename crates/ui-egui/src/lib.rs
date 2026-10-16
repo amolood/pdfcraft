@@ -2930,6 +2930,8 @@ impl eframe::App for PdfCraftApp {
         let cjk = theme::CjkPreference::for_language(lang.code());
         if !self.styled {
             egui_extras::install_image_loaders(ctx);
+            // Index the installed fonts edited text may need, before the first edit asks.
+            pdfcraft_fonts::installed::warm_up();
             theme::install_fonts_for(ctx, cjk);
             self.fonts_cjk = cjk;
             theme::apply(ctx, self.theme);

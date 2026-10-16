@@ -135,6 +135,69 @@ pub fn register_text_font(doc: &mut Document, page: usize, bytes: &[u8]) -> Resu
     Ok(name)
 }
 
+/// When `draft` has a character none of the paragraph's fonts can show (and no standard font
+/// can stand in for), embed the installed font that best shows all of it in this page's
+/// resources and return `style` with that font chosen. `None` when the style already picks a
+/// font, the text needs a path this can't take (Hebrew, turned text), or nothing installed fits.
+fn installed_font_style(
+    doc: &mut Document,
+    page: usize,
+    members: &[&TextLine],
+    draft: &str,
+    style: &BlockStyle,
+) -> Result<Option<BlockStyle>, EditError> {
+    if style.resource.is_some() || style.family.is_some() || style.bold.is_some() || !style.ranges.is_empty() {
+        return Ok(None);
+    }
+    let Some(first) = members.first() else { return Ok(None) };
+    if draft.chars().any(crate::bidi::is_hebrew) || !members.iter().all(|line| line.upright()) {
+        return Ok(None);
+    }
+    let p = page_dict(doc, page)?;
+    let fonts = p.dict.get(b"Resources").and_then(|r| doc.dict(r)).and_then(|r| r.get(b"Font").and_then(|f| doc.dict(f))).unwrap_or_default();
+    let metrics: Vec<Metrics> =
+        members.iter().filter_map(|line| fonts.get(line.font.as_bytes()).and_then(|f| doc.dict(f))).map(|d| Metrics::from_dict(doc, &d)).collect();
+    let missing =
+        draft.chars().any(|c| !c.is_whitespace() && !is_win_ansi_char(c) && !metrics.iter().any(|m| source_encodes(m, c.encode_utf8(&mut [0; 4]))));
+    if !missing {
+        return Ok(None);
+    }
+    let class = match source_family(&first.base_font) {
+        crate::added::Family::Times => pdfcraft_fonts::installed::Class::Serif,
+        crate::added::Family::Courier => pdfcraft_fonts::installed::Class::Mono,
+        crate::added::Family::Helvetica => pdfcraft_fonts::installed::Class::Sans,
+    };
+    let flat: String = draft.chars().filter(|c| !matches!(c, '\n' | '\r')).collect();
+    let Some((bytes, postscript)) = installed_font(&flat, class, first.bold, first.italic) else { return Ok(None) };
+    let mut resources = p.dict.get(b"Resources").and_then(|o| doc.dict(o)).unwrap_or_default();
+    let mut fonts = resources.get(b"Font").and_then(|o| doc.dict(o)).unwrap_or_default();
+    let name = pdfcraft_fonts::embedding::embed(doc, &mut fonts, &bytes, &postscript).map_err(EditError::Invalid)?;
+    resources.set(b"Font".to_vec(), Object::Dict(fonts));
+    doc.update_dict(p.obj, |d| d.set(b"Resources".to_vec(), Object::Dict(resources)))?;
+    Ok(Some(BlockStyle { resource: Some(name), ..style.clone() }))
+}
+
+/// The installed font program for `text`, and its PostScript name.
+#[cfg(not(test))]
+fn installed_font(text: &str, class: pdfcraft_fonts::installed::Class, bold: bool, italic: bool) -> Option<(std::sync::Arc<Vec<u8>>, String)> {
+    pdfcraft_fonts::installed::font_for(text, class, bold, italic)
+}
+
+/// Tests choose from the faces they set, never from the fonts of the machine running them.
+#[cfg(test)]
+fn installed_font(text: &str, class: pdfcraft_fonts::installed::Class, bold: bool, italic: bool) -> Option<(std::sync::Arc<Vec<u8>>, String)> {
+    TEST_INSTALLED.with_borrow(|faces| {
+        let face = pdfcraft_fonts::installed::best(faces, text, class, bold, italic)?;
+        Some((pdfcraft_fonts::installed::load(face)?, face.postscript.clone()))
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The installed faces [`installed_font`] sees in this test thread (none unless a test sets them).
+    pub(crate) static TEST_INSTALLED: std::cell::RefCell<Vec<pdfcraft_fonts::installed::InstalledFace>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Read-only draft bounds, measured with the same PDF rewrite used by Apply/Save.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextEditLayout {
@@ -2010,6 +2073,13 @@ fn rewrite_block_from(
     let b = blocks.get(block).cloned().ok_or_else(|| EditError::Invalid(format!("page {} has no paragraph {}", page + 1, block + 1)))?;
     let members: Vec<&TextLine> = b.lines.iter().map(|i| &lines[*i]).collect();
     let first = members.first().copied().ok_or_else(|| EditError::Invalid("the paragraph has no source runs".into()))?;
+    // A draft the paragraph's fonts can't show is written in one installed font that shows all
+    // of it. The chosen font becomes the paragraph's resource, so the rewrite below can't loop.
+    if let Some(draft) = text
+        && let Some(auto) = installed_font_style(doc, page, &members, draft, style)?
+    {
+        return rewrite_block_from(doc, page, lines, block, text, &auto, max_glyphs);
+    }
     let p = page_dict(doc, page)?;
     let mut res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
     let mut fonts_res = res.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
