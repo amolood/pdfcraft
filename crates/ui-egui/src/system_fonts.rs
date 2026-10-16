@@ -8,8 +8,9 @@
 //! read at runtime and never embedded or shipped (AGENTS.md §1.4), and `PDFCRAFT_SYSTEM_FONTS=0`
 //! turns it off (published screenshots do).
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use egui::FontData;
 
@@ -63,8 +64,13 @@ pub fn fallback(need: Need) -> Option<Arc<FontData>> {
     cache.get_or_init(|| load(need)).clone()
 }
 
+/// Whether installed faces may be read at all: `PDFCRAFT_SYSTEM_FONTS=0` turns them off.
+fn enabled() -> bool {
+    std::env::var_os("PDFCRAFT_SYSTEM_FONTS").is_none_or(|v| v != "0")
+}
+
 fn load(need: Need) -> Option<Arc<FontData>> {
-    if std::env::var_os("PDFCRAFT_SYSTEM_FONTS").is_some_and(|v| v == "0") {
+    if !enabled() {
         return None;
     }
     let (probe, max) = match need {
@@ -104,7 +110,7 @@ pub fn tamil_fallback() -> Option<Arc<FontData>> {
 }
 
 fn script_fallback(candidates: &[PathBuf], probe: char) -> Option<Arc<FontData>> {
-    if std::env::var_os("PDFCRAFT_SYSTEM_FONTS").is_some_and(|v| v == "0") {
+    if !enabled() {
         return None;
     }
     candidates.iter().find_map(|path| read(path, probe, MAX_BYTES))
@@ -300,7 +306,7 @@ fn unix_fonts(files: &'static [&'static str]) -> Vec<PathBuf> {
     // Read once per process, and not at all when installed fonts are turned off.
     let installed = INSTALLED
         .get_or_init(|| {
-            if std::env::var_os("PDFCRAFT_SYSTEM_FONTS").is_some_and(|v| v == "0") {
+            if !enabled() {
                 return Vec::new();
             }
             fontconfig::font_files(&fontconfig::config_path())
@@ -327,24 +333,56 @@ fn unix_candidates(files: &[&str], installed: &[PathBuf]) -> Vec<PathBuf> {
     paths
 }
 
+/// Faces already read, by file and face index. One installed file often serves several scripts
+/// (Nirmala UI has Devanagari, Telugu, Sinhala and Tamil; Arial Unicode on macOS three of them),
+/// and without this each script would read and keep its own copy of the whole file.
+static LOADED: Mutex<Vec<(PathBuf, u32, Arc<FontData>)>> = Mutex::new(Vec::new());
+
 fn read(path: &Path, probe: char, max: u64) -> Option<Arc<FontData>> {
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > max {
-        return None;
+    // A poisoned lock only means another thread panicked mid-push; the list is still valid.
+    let mut loaded = LOADED.lock().unwrap_or_else(PoisonError::into_inner);
+    read_cached(&mut loaded, path, probe, max)
+}
+
+fn read_cached(loaded: &mut Vec<(PathBuf, u32, Arc<FontData>)>, path: &Path, probe: char, max: u64) -> Option<Arc<FontData>> {
+    if let Some((_, _, data)) = loaded
+        .iter()
+        .find(|(p, index, data)| p == path && u64::try_from(data.font.len()).is_ok_and(|len| len <= max) && maps(&data.font, *index, probe))
+    {
+        return Some(Arc::clone(data));
     }
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = read_capped(path, max)?;
     let index = face_with(&bytes, probe)?;
     let mut data = FontData::from_owned(bytes);
     data.index = index;
     log::info!("interface font fallback: {} (face {index})", path.display());
-    Some(Arc::new(crate::theme::on_interface_baseline(data)))
+    let data = Arc::new(crate::theme::on_interface_baseline(data));
+    loaded.push((path.to_owned(), index, Arc::clone(&data)));
+    Some(data)
+}
+
+/// The file's bytes, or `None` when it is not a regular file or is larger than `max`. The read
+/// itself is capped too, so a file that grows after the size check can't make it unbounded.
+fn read_capped(path: &Path, max: u64) -> Option<Vec<u8>> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > max {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).ok()?);
+    std::fs::File::open(path).ok()?.take(max.saturating_add(1)).read_to_end(&mut bytes).ok()?;
+    (u64::try_from(bytes.len()).ok()? <= max).then_some(bytes)
+}
+
+/// Whether face `index` of the file parses and maps `c`.
+fn maps(bytes: &[u8], index: u32, c: char) -> bool {
+    use skrifa::MetadataProvider as _;
+    skrifa::FontRef::from_index(bytes, index).is_ok_and(|font| font.charmap().map(c).is_some())
 }
 
 /// The first face of the file that parses and maps `c`. egui parses fonts with the same skrifa,
 /// so a face accepted here is one it can load.
 fn face_with(bytes: &[u8], c: char) -> Option<u32> {
-    use skrifa::MetadataProvider as _;
-    (0..MAX_FACES).find(|&index| skrifa::FontRef::from_index(bytes, index).is_ok_and(|font| font.charmap().map(c).is_some()))
+    (0..MAX_FACES).find(|&index| maps(bytes, index, c))
 }
 
 #[cfg(test)]
@@ -387,6 +425,29 @@ mod tests {
         let inter = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/fonts/Inter-Regular.ttf"));
         assert!(read(inter, 'A', MAX_BYTES).is_some());
         assert!(read(inter, 'A', 1024).is_none());
+    }
+
+    #[test]
+    fn one_file_serving_several_scripts_is_read_once() {
+        let inter = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/fonts/Inter-Regular.ttf"));
+        let mut loaded = Vec::new();
+        let latin = read_cached(&mut loaded, inter, 'A', MAX_BYTES).expect("Inter has A");
+        // Cyrillic from the same face: the same bytes, not a second copy.
+        let cyrillic = read_cached(&mut loaded, inter, '\u{0416}', MAX_BYTES).expect("Inter has Ж");
+        assert!(Arc::ptr_eq(&latin, &cyrillic));
+        assert_eq!(loaded.len(), 1);
+        // A probe the face lacks is still rejected, cached or not.
+        assert!(read_cached(&mut loaded, inter, PROBE, MAX_BYTES).is_none());
+        assert_eq!(loaded.len(), 1);
+    }
+
+    #[test]
+    fn the_read_is_capped_at_the_limit() {
+        let inter = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/fonts/Inter-Regular.ttf"));
+        let len = std::fs::metadata(inter).expect("asset").len();
+        assert_eq!(read_capped(inter, len).map(|b| b.len() as u64), Some(len));
+        assert!(read_capped(inter, len - 1).is_none());
+        assert!(read_capped(Path::new("definitely/not/here.ttf"), MAX_BYTES).is_none());
     }
 
     #[test]
