@@ -24,8 +24,15 @@ page. Select **Keep source fonts** to preserve each run's original face. A match
 completes its subsets automatically, including new Chinese characters. When the PDF itself embeds
 the complete program of a paragraph's font (not a subset) and its licence allows editable
 embedding, a character the font's encoding can't show is drawn with that same program. A
-character no available face has is refused with an error that names it. Choosing another face
-is explicit. Fonts with restricted embedding, unsupported collections, excluded families or
+character no available face has is refused with an error that names it. When the draft has a character
+none of the paragraph's fonts (nor a standard font) can show, the whole paragraph is written
+in the installed font that best shows all of it: one matching the paragraph's sans/serif/mono
+look and weight, common document families (Arial, Tahoma, Times New Roman…) before decorative
+ones. The search covers system and user font folders, takes static standalone `.ttf`/`.otf`
+faces whose `fsType` allows editable embedding (collections and variable fonts are skipped),
+and is indexed once in the background at startup. `PDFCRAFT_SYSTEM_FONTS=0` turns it off.
+*Fork note: this embeds proprietary installed fonts too, which the upstream asset policy
+(AGENTS.md §1.2/§1.4) does not allow; whoever edits is responsible for each font's licence.* Fonts with restricted embedding, unsupported collections, excluded families or
 no open-licence declaration are refused. Interface fallback fonts are never exported.
 
 The full selected program, glyph mappings, widths and Unicode text are embedded in the PDF.
